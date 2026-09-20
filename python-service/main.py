@@ -14,7 +14,6 @@ Then test in a browser:
 """
 
 from fastapi import FastAPI
-from sentence_transformers import SentenceTransformer
 import requests
 import xml.etree.ElementTree as ET
 import cohere
@@ -140,17 +139,14 @@ def fetch_candidates(q: str, max_results: int = 20):
 
 
 # Loaded once at startup, not per-request (same "build once" principle as your C++ index)
-model = SentenceTransformer('all-MiniLM-L6-v2')  # small, fast, good enough for this scale
+  # small, fast, good enough for this scale
 
-@app.get("/embed")
-def embed(text: str):
-    embedding = model.encode(text).tolist()  # .tolist() converts numpy array -> plain Python list
-    return {"embedding": embedding}
+
 
 class EmbedRequest(BaseModel):
     texts: List[str]
 
 @app.post("/embed-batch")
 def embed_batch(request: EmbedRequest):
-    embeddings = model.encode(request.texts).tolist()
-    return {"embeddings": embeddings}
+    response = co.embed(texts=request.texts, model="embed-english-v3.0", input_type="search_document")
+    return {"embeddings": response.embeddings}

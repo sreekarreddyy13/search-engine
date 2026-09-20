@@ -1,6 +1,5 @@
 fastapi
 uvicorn
 requests
-sentence-transformers
 cohere
 python-dotenv
