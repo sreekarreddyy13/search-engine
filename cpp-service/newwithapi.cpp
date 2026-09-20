@@ -19,10 +19,7 @@ string getPythonServiceUrl() {
     return url ? string(url) : "http://localhost:5000";
 }
 
-string getPythonServiceUrl() {
-    const char* url = std::getenv("PYTHON_SERVICE_URL");
-    return url ? string(url) : "http://localhost:5000";
-}
+
 using namespace std;
 namespace fs = std::filesystem;
 using json = nlohmann::json;
