@@ -14,6 +14,10 @@
 #include <unordered_map>
 #include <algorithm>
 
+string getPythonServiceUrl() {
+    const char* url = std::getenv("PYTHON_SERVICE_URL");
+    return url ? string(url) : "http://localhost:5000";
+}
 
 string getPythonServiceUrl() {
     const char* url = std::getenv("PYTHON_SERVICE_URL");
