@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Research Paper Search Engine</title>
+<style>
+    body {
+        font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+        max-width: 800px;
+        margin: 40px auto;
+        padding: 0 20px;
+        color: #1a1a1a;
+        background: #fafafa;
+    }
+    h1 {
+        font-size: 1.6rem;
+        margin-bottom: 4px;
+    }
+    p.subtitle {
+        color: #666;
+        margin-top: 0;
+        margin-bottom: 30px;
+    }
+    .panel {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 24px;
+    }
+    .panel h2 {
+        font-size: 1.1rem;
+        margin-top: 0;
+    }
+    input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        font-size: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        box-sizing: border-box;
+        margin-bottom: 10px;
+    }
+    button {
+        padding: 10px 18px;
+        font-size: 0.95rem;
+        border: none;
+        border-radius: 6px;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+    }
+    button:disabled {
+        background: #93b4f0;
+        cursor: default;
+    }
+    button:hover:not(:disabled) {
+        background: #1d4ed8;
+    }
+    .result-item {
+        border-top: 1px solid #eee;
+        padding: 12px 0;
+    }
+    .result-item:first-child {
+        border-top: none;
+    }
+    .result-title {
+        font-weight: 600;
+        margin-bottom: 4px;
+    }
+    .result-abstract {
+        color: #444;
+        font-size: 0.92rem;
+        line-height: 1.4;
+    }
+    .result-score {
+        color: #888;
+        font-size: 0.8rem;
+        margin-top: 4px;
+    }
+    .answer-box {
+        background: #f0f5ff;
+        border: 1px solid #c9dbff;
+        border-radius: 6px;
+        padding: 16px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+    }
+    .sources-list {
+        margin-top: 12px;
+        font-size: 0.88rem;
+        color: #555;
+    }
+    .status {
+        color: #888;
+        font-style: italic;
+        font-size: 0.9rem;
+    }
+    .error {
+        color: #b91c1c;
+    }
+</style>
+</head>
+<body>
+
+<h1>Research Paper Search Engine</h1>
+<p class="subtitle">Hybrid lexical + semantic search over live research papers, with AI-generated cited answers.</p>
+
+<div class="panel">
+    <h2>Search papers</h2>
+    <input type="text" id="searchInput" placeholder="e.g. neural network quantization" />
+    <button id="searchBtn" onclick="runSearch()">Search</button>
+    <div id="searchStatus" class="status"></div>
+    <div id="searchResults"></div>
+</div>
+
+<div class="panel">
+    <h2>Ask a question</h2>
+    <input type="text" id="askInput" placeholder="e.g. what are common approaches to reducing LLM inference cost?" />
+    <button id="askBtn" onclick="runAsk()">Ask</button>
+    <div id="askStatus" class="status"></div>
+    <div id="askAnswer"></div>
+</div>
+
+<script>
+    const API_BASE = "http://localhost:8080";
+
+    async function runSearch() {
+        const query = document.getElementById("searchInput").value.trim();
+        const statusEl = document.getElementById("searchStatus");
+        const resultsEl = document.getElementById("searchResults");
+        const btn = document.getElementById("searchBtn");
+
+        if (!query) return;
+
+        btn.disabled = true;
+        statusEl.textContent = "Searching...";
+        resultsEl.innerHTML = "";
+
+        try {
+            const res = await fetch(`${API_BASE}/hybrid-search?q=${encodeURIComponent(query)}`);
+            const data = await res.json();
+
+            if (data.error) {
+                statusEl.innerHTML = `<span class="error">${data.error}</span>`;
+                return;
+            }
+
+            statusEl.textContent = `${data.results.length} results`;
+
+            resultsEl.innerHTML = data.results.map(r => `
+                <div class="result-item">
+                    <div class="result-title">${escapeHtml(r.title)}</div>
+                    <div class="result-abstract">${escapeHtml(r.abstract)}...</div>
+                    <div class="result-score">fused score: ${r.fused_score.toFixed(4)}</div>
+                </div>
+            `).join("");
+        } catch (err) {
+            statusEl.innerHTML = `<span class="error">Failed to reach server. Is it running on localhost:8080?</span>`;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function runAsk() {
+        const question = document.getElementById("askInput").value.trim();
+        const statusEl = document.getElementById("askStatus");
+        const answerEl = document.getElementById("askAnswer");
+        const btn = document.getElementById("askBtn");
+
+        if (!question) return;
+
+        btn.disabled = true;
+        statusEl.textContent = "Thinking... (this can take a few seconds)";
+        answerEl.innerHTML = "";
+
+        try {
+            const res = await fetch(`${API_BASE}/ask?q=${encodeURIComponent(question)}`);
+            const data = await res.json();
+
+            if (data.error) {
+                statusEl.innerHTML = `<span class="error">${data.error}</span>`;
+                return;
+            }
+
+            statusEl.textContent = "";
+
+            const sourcesHtml = (data.sources || []).map((s, i) => `[${i+1}] ${escapeHtml(s)}`).join("<br>");
+
+            answerEl.innerHTML = `
+                <div class="answer-box">${escapeHtml(data.answer)}</div>
+                <div class="sources-list"><strong>Sources:</strong><br>${sourcesHtml}</div>
+            `;
+        } catch (err) {
+            statusEl.innerHTML = `<span class="error">Failed to reach server. Is it running on localhost:8080?</span>`;
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement("div");
+        div.textContent = str || "";
+        return div.innerHTML;
+    }
+
+    // Allow pressing Enter in either input box
+    document.getElementById("searchInput").addEventListener("keydown", e => {
+        if (e.key === "Enter") runSearch();
+    });
+    document.getElementById("askInput").addEventListener("keydown", e => {
+        if (e.key === "Enter") runAsk();
+    });
+</script>
+
+</body>
+</html>
