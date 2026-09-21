@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from typing import List
 import os
 from dotenv import load_dotenv
+import time
 
 load_dotenv()  # reads the .env file and loads its values into the environment
 
@@ -105,36 +106,70 @@ def fetch_from_arxiv(query: str, max_results: int = 50):
 
 # This decorator registers the function below as the handler for
 # GET requests to /fetch-candidates - same role as svr.Get(...) in httplib.
-@app.get("/fetch-candidates")
-@app.get("/fetch-candidates")
-def fetch_candidates(q: str, max_results: int = 20):
+
+
+
+
+_cache = {}          # {(query, max_results): (timestamp, papers)}
+CACHE_TTL = 3600     # 1 hour
+
+def fetch_from_semantic_scholar(q: str, max_results: int):
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": q,
         "limit": max_results,
-        "fields": "title,abstract,authors,year,citationCount,externalIds"
+        "fields": "title,abstract,authors,year,citationCount,externalIds",
     }
     headers = {"x-api-key": os.environ["SEMANTIC_SCHOLAR_API_KEY"]}
 
-    try:
+    for attempt in range(3):
         resp = requests.get(url, params=params, headers=headers, timeout=15)
+        print(f"S2 status: {resp.status_code} (attempt {attempt + 1})", flush=True)
+        if resp.status_code == 429:
+            wait = float(resp.headers.get("Retry-After", 2 ** attempt))
+            time.sleep(min(wait, 5))
+            continue
         resp.raise_for_status()
         data = resp.json().get("data", [])
-    except requests.exceptions.HTTPError as e:
-        return {"query": q, "count": 0, "papers": [], "error": f"Semantic Scholar API error: {e}"}
-
-    papers = []
-    for p in data:
-        papers.append({
+        return [{
             "id": p.get("paperId", ""),
             "title": p.get("title", ""),
             "authors": [a.get("name", "") for a in p.get("authors", [])],
             "abstract": p.get("abstract") or "",
             "published": str(p.get("year", "")),
-            "citationCount": p.get("citationCount", 0)
-        })
+            "citationCount": p.get("citationCount", 0),
+        } for p in data]
 
-    return {"query": q, "count": len(papers), "papers": papers}
+    raise RuntimeError("Semantic Scholar rate limit (429) after retries")
+
+
+@app.get("/fetch-candidates")
+def fetch_candidates(q: str, max_results: int = 20):
+    key = (q.lower().strip(), max_results)
+
+    # 1. cache
+    if key in _cache and time.time() - _cache[key][0] < CACHE_TTL:
+        papers = _cache[key][1]
+        return {"query": q, "count": len(papers), "papers": papers, "source": "cache"}
+
+    # 2. Semantic Scholar, 3. fall back to arXiv
+    try:
+        papers = fetch_from_semantic_scholar(q, max_results)
+        source = "semantic_scholar"
+    except Exception as e:
+        print(f"S2 failed, falling back to arXiv: {e}", flush=True)
+        try:
+            papers = fetch_from_arxiv(q, max_results)
+            for p in papers:
+                p.setdefault("citationCount", 0)
+            source = "arxiv_fallback"
+        except Exception as e2:
+            print(f"arXiv also failed: {e2}", flush=True)
+            return {"query": q, "count": 0, "papers": [], "error": str(e2)}
+
+    if papers:
+        _cache[key] = (time.time(), papers)
+    return {"query": q, "count": len(papers), "papers": papers, "source": source}
 
 
 
