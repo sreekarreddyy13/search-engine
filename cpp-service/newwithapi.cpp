@@ -13,6 +13,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <algorithm>
+#include <memory>
 
 std::string getPythonServiceUrl() {
     const char* url = std::getenv("PYTHON_SERVICE_URL");
@@ -24,19 +25,22 @@ using namespace std;
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// ---------- Trie (unchanged) ----------
+// ---------- Trie ----------
 struct TrieNode {
-    map<char, TrieNode*> children;
+    map<char, unique_ptr<TrieNode>> children;
     bool isEndOfWord = false;
 };
 
 std::string fetchCandidatesFromPython(const std::string& query) {
     httplib::Client cli(getPythonServiceUrl());  // connect to the Python service
+    cli.set_connection_timeout(60, 0);
+    cli.set_read_timeout(60, 0);
 
-    // Build the path with the query as a URL parameter, same shape as before
-    std::string path = "/fetch-candidates?q=" + query;
+    // Let httplib build and percent-encode the query string (handles spaces, &, #, +, etc.)
+    httplib::Params params;
+    params.emplace("q", query);
 
-    auto res = cli.Get(path);
+    auto res = cli.Get("/fetch-candidates", params);
 
     if (res && res->status == 200) {
         return res->body;   // this is the JSON text the Python service sent back
@@ -48,6 +52,8 @@ std::string fetchCandidatesFromPython(const std::string& query) {
 
 vector<vector<double>> getEmbeddingsBatch(const vector<string>& texts) {
     httplib::Client cli(getPythonServiceUrl());
+    cli.set_connection_timeout(60, 0);
+    cli.set_read_timeout(60, 0);
 
     json requestBody;
     requestBody["texts"] = texts;   // nlohmann/json can convert a vector<string> directly
@@ -56,11 +62,16 @@ vector<vector<double>> getEmbeddingsBatch(const vector<string>& texts) {
 
     vector<vector<double>> embeddings;
     if (res && res->status == 200) {
-        json parsed = json::parse(res->body);
-        for (auto& emb : parsed["embeddings"]) {
-            vector<double> vec;
-            for (auto& val : emb) vec.push_back(val.get<double>());
-            embeddings.push_back(vec);
+        try {
+            json parsed = json::parse(res->body);
+            for (auto& emb : parsed["embeddings"]) {
+                vector<double> vec;
+                for (auto& val : emb) vec.push_back(val.get<double>());
+                embeddings.push_back(vec);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to parse embed-batch response: " << e.what() << "\n";
+            return {};
         }
     }
     return embeddings;
@@ -68,34 +79,34 @@ vector<vector<double>> getEmbeddingsBatch(const vector<string>& texts) {
 
 class Trie {
 private:
-    TrieNode* root;
+    unique_ptr<TrieNode> root;
     void collectWords(TrieNode* node, string current, vector<string>& results) {
         if (node->isEndOfWord) results.push_back(current);
-        for (auto& child : node->children) collectWords(child.second, current + child.first, results);
+        for (auto& child : node->children) collectWords(child.second.get(), current + child.first, results);
     }
 public:
-    Trie() { root = new TrieNode(); }
+    Trie() { root = make_unique<TrieNode>(); }
     void insert(const string& word) {
-        TrieNode* node = root;
+        TrieNode* node = root.get();
         for (char ch : word) {
-            if (node->children.find(ch) == node->children.end()) node->children[ch] = new TrieNode();
-            node = node->children[ch];
+            if (node->children.find(ch) == node->children.end()) node->children[ch] = make_unique<TrieNode>();
+            node = node->children[ch].get();
         }
         node->isEndOfWord = true;
     }
     vector<string> autocomplete(const string& prefix) {
         vector<string> results;
-        TrieNode* node = root;
+        TrieNode* node = root.get();
         for (char ch : prefix) {
             if (node->children.find(ch) == node->children.end()) return results;
-            node = node->children[ch];
+            node = node->children[ch].get();
         }
         collectWords(node, prefix, results);
         return results;
     }
 };
 
-// ---------- Core functions (unchanged) ----------
+// ---------- Core functions ----------
 map<int, string> loadCorpus(const string& folderPath, map<int, string>& docNames) {
     map<int, string> documents;
     int docId = 0;
@@ -185,7 +196,6 @@ void buildIndexOnce() {
 }
 
 double cosineSimilarity(const vector<double>& a, const vector<double>& b) {
-    // your code here
     double dot=0;
     double a_m=0;
     double b_m=0;
@@ -284,6 +294,8 @@ map<int, double> reciprocalRankFusion(const vector<pair<int,double>>& rankingA,
 // Calls the new /generate-answer endpoint with a question + excerpts
 string generateAnswer(const string& question, const vector<pair<string,string>>& excerpts) {
     httplib::Client cli(getPythonServiceUrl());
+    cli.set_connection_timeout(60, 0);
+    cli.set_read_timeout(60, 0);
 
     json requestBody;
     requestBody["question"] = question;
@@ -300,12 +312,41 @@ string generateAnswer(const string& question, const vector<pair<string,string>>&
     auto res = cli.Post("/generate-answer", requestBody.dump(), "application/json");
 
     if (res && res->status == 200) {
-        json parsed = json::parse(res->body);
-        return parsed.value("answer", "No answer returned.");
+        try {
+            json parsed = json::parse(res->body);
+            return parsed.value("answer", "No answer returned.");
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to parse generate-answer response: " << e.what() << "\n";
+            return "Failed to parse answer-generation response.";
+        }
     }
     return "Failed to reach answer-generation service.";
 }
 
+// Turns a natural-language question into a short keyword query better suited to
+// Semantic Scholar's search (e.g. "tell me about the sodium content in biryani"
+// -> "sodium content biryani"). Falls back to the original question on any failure.
+string rewriteQueryForSearch(const string& question) {
+    httplib::Client cli(getPythonServiceUrl());
+    cli.set_connection_timeout(60, 0);
+    cli.set_read_timeout(60, 0);
+
+    json requestBody;
+    requestBody["question"] = question;
+
+    auto res = cli.Post("/rewrite-query", requestBody.dump(), "application/json");
+
+    if (res && res->status == 200) {
+        try {
+            json parsed = json::parse(res->body);
+            string rewritten = parsed.value("query", question);
+            if (!rewritten.empty()) return rewritten;
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to parse rewrite-query response: " << e.what() << "\n";
+        }
+    }
+    return question;
+}
 
 string performHybridSearch(const string& query) {
     string candidatesJson = fetchCandidatesFromPython(query);
@@ -492,7 +533,10 @@ string performBenchmarkComparison(const string& query) {
 }
 
 string performRAGAnswer(const string& question) {
-    string hybridJson = performHybridSearch(question);
+    // Use a keyword-style rewrite for candidate retrieval, but keep the original
+    // question for the actual answer generation below.
+    string searchQuery = rewriteQueryForSearch(question);
+    string hybridJson = performHybridSearch(searchQuery);
 
     json parsed;
     try {
@@ -527,7 +571,16 @@ string performRAGAnswer(const string& question) {
 }
 
 int main() {
-    buildIndexOnce();
+    try {
+        buildIndexOnce();
+    } catch (const std::filesystem::filesystem_error& e) {
+        cerr << "Fatal: could not read the corpus directory (" << e.what()
+             << "). Check that a 'corpus' folder exists next to the server binary.\n";
+        return 1;
+    } catch (const std::exception& e) {
+        cerr << "Fatal: failed to build the search index (" << e.what() << ").\n";
+        return 1;
+    }
 
     httplib::Server svr;
 

@@ -2,18 +2,19 @@
 main.py - Python/FastAPI microservice
 
 Handles the ML/Python-ecosystem pieces of the search engine:
-- /fetch-candidates: query arXiv, return matching paper metadata
-- (embeddings and RAG answer generation will be added here later)
+- /fetch-candidates: fetch candidate papers (Semantic Scholar, arXiv fallback)
+- /embed-batch: Cohere embeddings
+- /generate-answer: Cohere RAG answer generation
 
 Usage:
-    pip install fastapi uvicorn requests
+    pip install -r requirements.txt
     uvicorn main:app --reload --port 5000
 
 Then test in a browser:
     http://localhost:5000/fetch-candidates?q=transformer+compression
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import requests
 import xml.etree.ElementTree as ET
 import cohere
@@ -29,7 +30,8 @@ load_dotenv()  # reads the .env file and loads its values into the environment
 
 app = FastAPI()
 
-co = cohere.Client(os.environ["COHERE_API_KEY"])
+COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
+co = cohere.Client(COHERE_API_KEY) if COHERE_API_KEY else None
 class Excerpt(BaseModel):
     title: str
     text: str
@@ -40,6 +42,9 @@ class AskRequest(BaseModel):
 
 @app.post("/generate-answer")
 def generate_answer(request: AskRequest):
+    if co is None:
+        raise HTTPException(status_code=503, detail="COHERE_API_KEY not configured; /generate-answer is unavailable.")
+
     # Build a numbered context block from the retrieved excerpts
     context = ""
     for i, ex in enumerate(request.excerpts, start=1):
@@ -61,15 +66,46 @@ Answer:"""
 
     return {"answer": response.text}
 
-  # this object holds all your registered routes
+
+class RewriteRequest(BaseModel):
+    question: str
+
+QUERY_REWRITE_PREAMBLE = """Extract a short search query from the user question for an academic paper search engine.
+Rules:
+- Use only the specific nouns and named entities already present in the question.
+- Do not add generic qualifier words (e.g. "analysis", "techniques", "mechanisms", "overview") unless the user used them.
+- Do not add words that are not implied by the question.
+- 2 to 6 words. Output ONLY the query text, no quotes, no punctuation, no explanation."""
+
+@app.post("/rewrite-query")
+def rewrite_query(request: RewriteRequest):
+    # This is a best-effort retrieval aid for /ask: on any failure (missing key, API
+    # error, junk output) fall back to the original question rather than erroring out,
+    # since a caller can always search with the raw question anyway.
+    if co is not None:
+        try:
+            response = co.chat(
+                model="command-a-03-2025",
+                message=request.question,
+                preamble=QUERY_REWRITE_PREAMBLE,
+                temperature=0.3,
+                max_tokens=30,
+            )
+            rewritten = response.text.strip()
+            if 0 < len(rewritten) <= 100 and any(c.isalpha() for c in rewritten):
+                return {"query": rewritten}
+        except Exception as e:
+            print(f"Query rewrite failed, falling back to original question: {e}", flush=True)
+
+    return {"query": request.question}
+
 
 ARXIV_API_URL = "http://export.arxiv.org/api/query"
 NAMESPACE = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 def fetch_from_arxiv(query: str, max_results: int = 50):
-    
-    """Same logic as the standalone script, now used inside the service."""
+    """Fallback candidate source used when Semantic Scholar is unavailable."""
     params = {
         "search_query": f"all:{query}",
         "start": 0,
@@ -172,16 +208,13 @@ def fetch_candidates(q: str, max_results: int = 20):
     return {"query": q, "count": len(papers), "papers": papers, "source": source}
 
 
-
-# Loaded once at startup, not per-request (same "build once" principle as your C++ index)
-  # small, fast, good enough for this scale
-
-
-
 class EmbedRequest(BaseModel):
     texts: List[str]
 
 @app.post("/embed-batch")
 def embed_batch(request: EmbedRequest):
+    if co is None:
+        raise HTTPException(status_code=503, detail="COHERE_API_KEY not configured; /embed-batch is unavailable.")
+
     response = co.embed(texts=request.texts, model="embed-english-v3.0", input_type="search_document")
     return {"embeddings": response.embeddings}
