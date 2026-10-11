@@ -45,7 +45,12 @@ std::string fetchCandidatesFromPython(const std::string& query) {
     if (res && res->status == 200) {
         return res->body;   // this is the JSON text the Python service sent back
     } else {
-        std::cerr << "Failed to reach Python service\n";
+        if (res) {
+            std::cerr << "Failed to reach Python service: HTTP " << res->status
+                      << ", body: " << res->body.substr(0, 200) << "\n";
+        } else {
+            std::cerr << "Failed to reach Python service: " << httplib::to_string(res.error()) << "\n";
+        }
         return "{}";        // empty JSON as a fallback
     }
 }
