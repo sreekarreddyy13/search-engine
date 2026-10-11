@@ -353,7 +353,9 @@ string rewriteQueryForSearch(const string& question) {
     return question;
 }
 
-string performHybridSearch(const string& query) {
+// abstractLimit caps how many bytes of each abstract go into the response; callers that
+// want the full text (e.g. RAG) pass string::npos.
+string performHybridSearch(const string& query, size_t abstractLimit = 200) {
     string candidatesJson = fetchCandidatesFromPython(query);
 
     json parsed;
@@ -438,7 +440,7 @@ string performHybridSearch(const string& query) {
 
         if (shown > 0) json_out << ",";
         json_out << "{\"title\":\"" << escapeJson(title)
-                  << "\",\"abstract\":\"" << escapeJson(abstract.substr(0, 200))
+                  << "\",\"abstract\":\"" << escapeJson(abstract.substr(0, abstractLimit))
                   << "\",\"fused_score\":" << finalscores[j].second << "}";
     }
     json_out << "]}";
@@ -541,7 +543,7 @@ string performRAGAnswer(const string& question) {
     // Use a keyword-style rewrite for candidate retrieval, but keep the original
     // question for the actual answer generation below.
     string searchQuery = rewriteQueryForSearch(question);
-    string hybridJson = performHybridSearch(searchQuery);
+    string hybridJson = performHybridSearch(searchQuery, string::npos);  // full abstracts for the LLM
 
     json parsed;
     try {

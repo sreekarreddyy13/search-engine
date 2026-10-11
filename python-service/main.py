@@ -185,7 +185,7 @@ def fetch_from_semantic_scholar(q: str, max_results: int):
             continue
         resp.raise_for_status()
         data = resp.json().get("data", [])
-        return [{
+        papers = [{
             "id": p.get("paperId", ""),
             "title": p.get("title", ""),
             "authors": [a.get("name", "") for a in p.get("authors", [])],
@@ -193,6 +193,14 @@ def fetch_from_semantic_scholar(q: str, max_results: int):
             "published": str(p.get("year", "")),
             "citationCount": p.get("citationCount", 0),
         } for p in data]
+
+        # Papers without an abstract can't be ranked or shown usefully (and empty strings
+        # may make the embedding call fail), so drop them before they reach the cache.
+        with_abstract = [p for p in papers if p["abstract"].strip()]
+        if papers and not with_abstract:
+            # Raising here sends fetch_candidates to the arXiv fallback.
+            raise RuntimeError("Semantic Scholar returned papers but none had an abstract")
+        return with_abstract
 
     raise RuntimeError("Semantic Scholar rate limit (429) after retries")
 
