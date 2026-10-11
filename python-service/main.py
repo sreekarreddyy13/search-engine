@@ -149,6 +149,10 @@ def fetch_from_arxiv(query: str, max_results: int = 50):
 _cache = {}          # {(query, max_results): (timestamp, papers)}
 CACHE_TTL = 3600     # 1 hour
 
+S2_REQUEST_TIMEOUT = 15    # seconds per Semantic Scholar request
+S2_MAX_RETRY_WAIT = 15     # honour Retry-After up to this many seconds; longer -> give up
+S2_TOTAL_BUDGET = 30       # max seconds spent on Semantic Scholar (requests + waits)
+
 def fetch_from_semantic_scholar(q: str, max_results: int):
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
@@ -156,14 +160,28 @@ def fetch_from_semantic_scholar(q: str, max_results: int):
         "limit": max_results,
         "fields": "title,abstract,authors,year,citationCount,externalIds",
     }
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+    print(f"S2 key present={bool(key)} len={len(key) if key else 0} clean={key == key.strip() if key else None}", flush=True)
     headers = {"x-api-key": os.environ["SEMANTIC_SCHOLAR_API_KEY"]}
 
+    deadline = time.monotonic() + S2_TOTAL_BUDGET
     for attempt in range(3):
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=S2_REQUEST_TIMEOUT)
         print(f"S2 status: {resp.status_code} (attempt {attempt + 1})", flush=True)
         if resp.status_code == 429:
-            wait = float(resp.headers.get("Retry-After", 2 ** attempt))
-            time.sleep(min(wait, 5))
+            retry_after = resp.headers.get("Retry-After")
+            print(f"S2 429 Retry-After={retry_after!r} body={resp.text[:200]!r}", flush=True)
+            if attempt == 2:
+                break  # last attempt: nothing left to wait for
+            try:
+                wait = float(retry_after) if retry_after else 2 ** attempt
+            except ValueError:  # Retry-After can also be an HTTP date
+                wait = 2 ** attempt
+            # Give up (and let the caller fall back to arXiv) if the server wants a long
+            # wait, or if waiting would leave no time for another full request.
+            if wait > S2_MAX_RETRY_WAIT or time.monotonic() + wait + S2_REQUEST_TIMEOUT > deadline:
+                break
+            time.sleep(wait)
             continue
         resp.raise_for_status()
         data = resp.json().get("data", [])
